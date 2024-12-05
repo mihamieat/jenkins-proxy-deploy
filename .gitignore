@@ -1,0 +1,9 @@
+# Terraform related
+
+.terraform*
+*.tfstate*
+
+# misc
+
+.secrets
+*.pem

@@ -1,0 +1,129 @@
+- name: Add user and configure SSH
+  hosts: all
+  remote_user: admin
+  become: yes
+  tasks:
+    - name: Ensure the host is reachable
+      ansible.builtin.ping:
+
+    - name: Create custom user and add to sudo group
+      ansible.builtin.user:
+        name: mihamieat
+        group: sudo
+        password: "{{ '230792' | password_hash('sha512') }}"
+        shell: /bin/bash
+        generate_ssh_key: yes
+        ssh_key_bits: 2048
+        ssh_key_file: /home/mihamieat/.ssh/id_rsa
+      register: user_creation
+
+    - name: Create custom sshd config file
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/no-pass.conf
+        state: touch
+
+    - name: Disable password authentication for SSH
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config.d/no-pass.conf
+        regexp: "^#?PasswordAuthentication"
+        line: "PasswordAuthentication no"
+        state: present
+
+  handlers:
+    - name: restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+- name: Add Jenkins GPG key, repository and install JDK, then install Jenkins
+  hosts: all
+  remote_user: mihamieat
+  become: yes
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Java
+      ansible.builtin.apt:
+        name: default-jre
+        state: present
+
+    - name: Verify Java installation
+      ansible.builtin.command:
+        cmd: java -version
+      register: java_version
+
+    - name: Download Jenkins GPG key
+      ansible.builtin.get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: "0644"
+
+    - name: Add Jenkins repository to APT sources
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list.d/jenkins.list
+        line: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+        create: yes
+        state: present
+
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Jenkins
+      ansible.builtin.apt:
+        name: jenkins
+        state: present
+
+- name: Install nginx with reverse proxy configuration
+  hosts: all
+  remote_user: nginx
+  become: yes
+  tasks:
+    - name: Update package cache (Debian-based)
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install nginx package
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Create directory for SSL certificates
+      ansible.builtin.file:
+        path: /etc/ssl/certs
+        state: directory
+        mode: "0755"
+
+    - name: Generate self-signed certificate
+      ansible.builtin.command:
+        cmd: >
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048
+          -keyout /etc/ssl/private/nginx-selfsigned.key
+          -out /etc/ssl/certs/nginx-selfsigned.crt
+          - -subj "/C=FR/ST=IDF/L=Paris/O=Organization/OU=IT/CN=ec2-13-38-76-0.eu-west-3.compute.amazonaws.com"
+        creates: /etc/ssl/certs/nginx-selfsigned.crt
+
+    - name: Create reverse proxy configuration for Jenkins
+      ansible.builtin.template:
+        src: jenkins.conf.j2
+        dest: /etc/nginx/sites-available/jenkins
+        mode: "0644"
+
+    - name: Create symlink for Jenkins configuration
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/jenkins
+        dest: /etc/nginx/sites-enabled/jenkins
+        state: link
+
+    - name: Remove default Nginx site if exists
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Reload Nginx to apply changes
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
